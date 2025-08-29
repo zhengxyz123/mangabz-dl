@@ -1,0 +1,11 @@
+[project]
+name = "mangabz-downloader"
+version = "1.0.0"
+description = "Download manga from Mangabz."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.13.5",
+    "requests>=2.32.5",
+    "tqdm>=4.67.1",
+]
