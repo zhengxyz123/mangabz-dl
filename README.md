@@ -10,11 +10,9 @@ For detailed command line arguments, please enter:
 python mangabz-dl.py -h
 ```
 
-> Node.js must be installed for some reason.
-
 ## Useful Tips
 
-You can use [ImageMagick](https://imagemagick.org/script/download.php) to pack images into a pdf:
+You can use [ImageMagick](https://imagemagick.org/script/download.php) to pack images into a pdf file:
 
 ```bash
 magick *.jpg output.pdf
