@@ -27,8 +27,8 @@ import re
 import shutil
 import sys
 import textwrap
-from random import choice
 from pathlib import Path
+from random import choice
 from subprocess import PIPE, Popen
 from typing import NamedTuple
 
@@ -47,49 +47,35 @@ class UnpackingError(Exception):
     pass
 
 
-beginstr = ""
-endstr = ""
-
-
-def detect(source: str) -> bool:
-    """Detects whether `source` is P.A.C.K.E.R. coded."""
-    global beginstr
-    global endstr
-    beginstr = ""
-    endstr = ""
-    begin_offset = -1
+def unpack(source: str) -> str:
+    """Unpack P.A.C.K.E.R packed js code."""
     mystr = re.search(
         r"eval[ ]*\([ ]*function[ ]*\([ ]*p[ ]*,[ ]*a[ ]*,[ ]*c["
         " ]*,[ ]*k[ ]*,[ ]*e[ ]*,[ ]*",
         source,
     )
-    if mystr:
-        begin_offset = mystr.start()
-        beginstr = source[:begin_offset]
-    if begin_offset != -1:
-        """Find endstr"""
-        source_end = source[begin_offset:]
-        if source_end.split("')))", 1)[0] == source_end:
-            try:
-                endstr = source_end.split("}))", 1)[1]
-            except IndexError:
-                endstr = ""
-        else:
-            endstr = source_end.split("')))", 1)[1]
-    return mystr is not None
+    if mystr is None:
+        raise UnpackingError("not a P.A.C.K.E.R code")
 
-
-def unpack(source: str) -> str:
-    """Unpacks P.A.C.K.E.R. packed js code."""
+    begin_offset = mystr.start()
+    beginstr = source[:begin_offset]
+    source_end = source[begin_offset:]
+    if source_end.split("')))", 1)[0] == source_end:
+        try:
+            endstr = source_end.split("}))", 1)[1]
+        except IndexError:
+            endstr = ""
+    else:
+        endstr = source_end.split("')))", 1)[1]
     payload, symtab, radix, count = _filterargs(source)
 
     if count != len(symtab):
-        raise UnpackingError("Malformed p.a.c.k.e.r. symtab.")
+        raise UnpackingError("malformed P.A.C.K.E.R symtab")
 
     try:
         unbase = Unbaser(radix)
     except TypeError:
-        raise UnpackingError("Unknown p.a.c.k.e.r. encoding.")
+        raise UnpackingError("unknown P.A.C.K.E.R encoding")
 
     def lookup(match):
         """Look up symbols in the synthetic symtab."""
@@ -97,11 +83,8 @@ def unpack(source: str) -> str:
         return symtab[unbase(word)] or word
 
     payload = payload.replace("\\\\", "\\").replace("\\'", "'")
-    if sys.version_info.major == 2:
-        source = re.sub(r"\b\w+\b", lookup, payload)
-    else:
-        source = re.sub(r"\b\w+\b", lookup, payload, flags=re.ASCII)
-    return _replacestrings(source)
+    source = re.sub(r"\b\w+\b", lookup, payload, flags=re.ASCII)
+    return _replacestrings(source, beginstr, endstr)
 
 
 def _filterargs(source: str) -> tuple[str, list[str], int, int]:
@@ -121,18 +104,16 @@ def _filterargs(source: str) -> tuple[str, list[str], int, int]:
             try:
                 return a[0], a[3].split("|"), int(a[1]), int(a[2])
             except ValueError:
-                raise UnpackingError("Corrupted p.a.c.k.e.r. data.")
+                raise UnpackingError("corrupted P.A.C.K.E.R data")
 
-    # could not find a satisfying regex
+    # Could not find a satisfying regex
     raise UnpackingError(
-        "Could not make sense of p.a.c.k.e.r data (unexpected code structure)"
+        "could not make sense of P.A.C.K.E.R data (unexpected code structure)"
     )
 
 
-def _replacestrings(source: str) -> str:
+def _replacestrings(source: str, beginstr: str, endstr: str) -> str:
     """Strip string lookup table (list) and replace values in source."""
-    global beginstr
-    global endstr
     match = re.search(r'var *(_\w+)\=\["(.*?)"\];', source, re.DOTALL)
 
     if match:
@@ -147,8 +128,7 @@ def _replacestrings(source: str) -> str:
 
 
 class Unbaser(object):
-    """Functor for a given base. Will efficiently convert
-    strings to natural numbers."""
+    """Functor for a given base. Will efficiently convert strings to natural numbers."""
 
     ALPHABET = {
         62: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
@@ -161,12 +141,10 @@ class Unbaser(object):
     def __init__(self, base: int) -> None:
         self.base = base
 
-        # fill elements 37...61, if necessary
+        # Fill elements 37...61, if necessary
         if 36 < base < 62:
             if not hasattr(self.ALPHABET, self.ALPHABET[62][:base]):
                 self.ALPHABET[base] = self.ALPHABET[62][:base]
-        # attrs = self.ALPHABET
-        # print ', '.join("%s: %s" % item for item in attrs.items())
         # If base can be handled by int() builtin, let it do it for us
         if 2 <= base <= 36:
             self.unbase = lambda string: int(string, base)
@@ -177,7 +155,7 @@ class Unbaser(object):
                     (cipher, index) for index, cipher in enumerate(self.ALPHABET[base])
                 )
             except KeyError:
-                raise TypeError("Unsupported base encoding.")
+                raise TypeError("unsupported base encoding")
 
             self.unbase = self._dictunbaser
 
@@ -185,7 +163,7 @@ class Unbaser(object):
         return self.unbase(string)
 
     def _dictunbaser(self, string: str) -> int:
-        """Decodes a  value to an integer."""
+        """Decode a value to an integer."""
         ret = 0
         for index, cipher in enumerate(string[::-1]):
             ret += (self.base**index) * self.dictionary[cipher]
@@ -221,6 +199,19 @@ class MangaInfo(NamedTuple):
 
 
 def parse_range(string: str, info: MangaInfo) -> list[int]:
+    """Parse comma separated string to a list.
+
+    `[start]-[end]` presents a range.
+
+    For example:
+
+    ```python
+    parse_range("1", ...) == [1]
+    parse_range("1,2", ...) == [2]
+    parse_range("1-5", ...) == [1, 2, 3, 4, 5]
+    parse_range("1-5,7-10", ...) == [1, 2, 3, 4, 5, 7, 8, 9, 10]
+    ```
+    """
     if len(string) == 0:
         return list(range(len(info.chapters)))
     result = []
@@ -230,16 +221,15 @@ def parse_range(string: str, info: MangaInfo) -> list[int]:
             for i in range(int(part[:hyphen]), int(part[hyphen + 1 :]) + 1):
                 if i not in result:
                     result.append(i)
-        elif part.isdigit() and part.isdecimal():
-            if int(part) not in result:
-                result.append(int(part))
         else:
-            raise ValueError(f"unknow range {part!r}")
+            if (i := int(part)) not in result:
+                result.append(i)
     result = [i - 1 for i in result if 1 <= i <= len(info.chapters)]
     return sorted(result)
 
 
 def find_mangabz_var(name: str, string: str) -> str:
+    """Find a variable named `name` in javascript `string`."""
     start = string.find(f"var {name}")
     a = string.find("=", start) + 1
     b = string.find(";", start)
@@ -249,6 +239,7 @@ def find_mangabz_var(name: str, string: str) -> str:
 def get_manga_info(
     session: requests.Session, manga: str, is_chapter: bool = False
 ) -> MangaInfo:
+    """Get manga metadata."""
     response = session.get(f"https://mangabz.com/{manga}/")
     response.raise_for_status()
     dom = BeautifulSoup(response.text, features="html.parser")
@@ -268,6 +259,14 @@ def get_manga_info(
 
 
 def list_chapters(info: MangaInfo) -> None:
+    """List all chapters using `less` (or other program defined in `$PAGER`).
+
+    Output format like:
+
+    ```
+    index: chapter name (chapter id)
+    ```
+    """
     pager = shutil.which(os.environ.get("PAGER", "less"))
     has_pager = pager is not None
     if not sys.stdout.isatty():
@@ -293,6 +292,7 @@ def list_chapters(info: MangaInfo) -> None:
 def download_manga(
     session: requests.Session, info: MangaInfo, index: int, is_chapter: bool = False
 ) -> None:
+    """Download manga and save it in a specific directory."""
     response = session.get(f"https://mangabz.com/{info.chapters[index].href}/")
     response.raise_for_status()
     mid = find_mangabz_var("COMIC_MID", response.text)
@@ -325,8 +325,6 @@ def download_manga(
             headers={"Referer": f"https://mangabz.com/{info.chapters[index].href}/"},
         )
         code.raise_for_status()
-        if not detect(code.text):
-            raise UnpackingError("not a p.a.c.k.e.r. code")
         unpack_code = unpack(code.text)
         pix = re.search(r'pix="(.*?)"', unpack_code).group(1)
         suffix = re.search(r"pix\+pvalue\[i\]\+'(.*?)'", unpack_code).group(1)
@@ -367,7 +365,7 @@ def main() -> int:
                 comma separated index of chapters to download;
                 using '[start]-[end]' to specify a range;
                 e.g. '1', '1,2', '1-10', '1,3-10' and '1-5,7-10';
-                using --chapters option to see chapter index
+                using -c/--chapters option to see chapter index
             """
         ),
     )
@@ -411,22 +409,21 @@ def main() -> int:
         list_chapters(manga_info)
         return 0
 
-    try:
-        if is_chapter:
-            chap_range = [0]
-        else:
-            chap_range = parse_range(args.range, manga_info)
-    except Exception as err:
-        print(err.args[0])
-        return 1
+    if is_chapter:
+        chap_range = [0]
+    else:
+        chap_range = parse_range(args.range, manga_info)
     for n in chap_range:
-        try:
-            download_manga(session, manga_info, n, is_chapter=is_chapter)
-        except Exception as err:
-            print(err.args[0])
-            return 1
+        download_manga(session, manga_info, n, is_chapter=is_chapter)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as err:
+        print(err.args[0])
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("interrupted by user")
+        sys.exit(1)
