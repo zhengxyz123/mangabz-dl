@@ -27,6 +27,7 @@ import re
 import shutil
 import sys
 import textwrap
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from random import choice
 from subprocess import PIPE, Popen
@@ -198,6 +199,11 @@ class MangaInfo(NamedTuple):
     chapters: list[ChapterInfo]
 
 
+class FileInfo(NamedTuple):
+    url: str
+    file: Path
+
+
 def parse_range(string: str, info: MangaInfo) -> list[int]:
     """Parse comma separated string to a list.
 
@@ -207,7 +213,7 @@ def parse_range(string: str, info: MangaInfo) -> list[int]:
 
     ```python
     parse_range("1", ...) == [1]
-    parse_range("1,2", ...) == [2]
+    parse_range("1,2", ...) == [1, 2]
     parse_range("1-5", ...) == [1, 2, 3, 4, 5]
     parse_range("1-5,7-10", ...) == [1, 2, 3, 4, 5, 7, 8, 9, 10]
     ```
@@ -229,7 +235,7 @@ def parse_range(string: str, info: MangaInfo) -> list[int]:
 
 
 def find_mangabz_var(name: str, string: str) -> str:
-    """Find a variable named `name` in javascript `string`."""
+    """Find a variable named `name` in `string`."""
     start = string.find(f"var {name}")
     a = string.find("=", start) + 1
     b = string.find(";", start)
@@ -289,10 +295,35 @@ def list_chapters(info: MangaInfo) -> None:
                 )
 
 
+def _download_file(session: requests.Session, info: FileInfo) -> bool:
+    """The function to parallel download data and save file."""
+    try:
+        response = requests.get(
+            info.url,
+            cookies=session.cookies,
+            headers={
+                "User-Agent": session.headers["User-Agent"],
+                "Referer": "https://mangabz.com/",
+            },
+        )
+        response.raise_for_status()
+        info.file.write_bytes(response.content)
+        return True
+    except Exception:
+        if info.file.exists():
+            os.remove(info.file)
+        return False
+
+
 def download_manga(
-    session: requests.Session, info: MangaInfo, index: int, is_chapter: bool = False
+    session: requests.Session,
+    info: MangaInfo,
+    index: int,
+    output_dir: Path,
+    max_workers: int,
+    is_chapter: bool,
 ) -> None:
-    """Download manga and save it in a specific directory."""
+    """Parallel download manga and save it in a specific directory."""
     response = session.get(f"https://mangabz.com/{info.chapters[index].href}/")
     response.raise_for_status()
     mid = find_mangabz_var("COMIC_MID", response.text)
@@ -301,15 +332,16 @@ def download_manga(
     viewsign_dt = find_mangabz_var("MANGABZ_VIEWSIGN_DT", response.text)
     total_pages = int(find_mangabz_var("MANGABZ_IMAGE_COUNT", response.text))
 
-    print(f"Downloading {info.chapters[index].title!r}...")
+    print(f"resolving image urls of chapter {info.chapters[index].title!r}...")
     if is_chapter:
-        save_dir = Path(info.title)
+        save_dir = output_dir / Path(info.title)
     else:
-        save_dir = Path(info.title) / info.chapters[index].title
+        save_dir = output_dir / Path(info.title) / info.chapters[index].title
     save_dir.mkdir(parents=True, exist_ok=True)
+    file_lists: list[FileInfo] = []
     num_width = len(str(total_pages))
     now_page = 0
-    bar = tqdm(total=total_pages)
+    bar = tqdm(total=total_pages, unit="url")
     while now_page < total_pages:
         code = session.get(
             f"https://mangabz.com/{info.chapters[index].href}/chapterimage.ashx",
@@ -332,12 +364,28 @@ def download_manga(
         for url in [(pix + p + suffix) for p in pvalue]:
             now_page += 1
             save_file = save_dir / "{0:0{width}}.jpg".format(now_page, width=num_width)
-            with open(save_file, "wb+") as f:
-                pic = session.get(url, headers={"Referer": "https://mangabz.com/"})
-                pic.raise_for_status()
-                f.write(pic.content)
+            file_lists.append(FileInfo(url, save_file))
             bar.update(1)
     bar.close()
+
+    print(f"downloading chapter {info.chapters[index].title!r}...")
+    success, failed = 0, 0
+    with (
+        ThreadPoolExecutor(max_workers=max_workers) as executor,
+        tqdm(total=len(file_lists), unit="file") as pbar,
+    ):
+        futures = {
+            executor.submit(_download_file, session, item): item for item in file_lists
+        }
+        for f in as_completed(futures):
+            if f.result:
+                success += 1
+            else:
+                failed += 1
+            pbar.update(1)
+    print(
+        f"chapter {info.chapters[index].title!r} downloaded, {success} success and {failed} failed"
+    )
 
 
 def main() -> int:
@@ -345,29 +393,20 @@ def main() -> int:
         description="A Python tool for downloading manga from Mangabz."
     )
     parser.add_argument(
-        "-l",
-        "--language",
-        choices=["zh_sim", "zh_tra"],
-        default="zh_sim",
-        help=textwrap.dedent(
-            """\
-                website language
-                ('zh_sim' for Simplified Chinese, 'zh_tra' for Traditional Chinese)
-            """
-        ),
+        "-d",
+        "--output-dir",
+        metavar="DIR",
+        type=Path,
+        default=Path.cwd(),
+        help="output directory, default is current directory",
     )
     parser.add_argument(
-        "-r",
-        "--range",
-        default="",
-        help=textwrap.dedent(
-            """\
-                comma separated index of chapters to download;
-                using '[start]-[end]' to specify a range;
-                e.g. '1', '1,2', '1-10', '1,3-10' and '1-5,7-10';
-                using -c/--chapters option to see chapter index
-            """
-        ),
+        "-t",
+        "--threads",
+        metavar="NUM",
+        type=int,
+        default=4,
+        help="using NUM threads to download, default is 4",
     )
     parser.add_argument(
         "-c",
@@ -381,10 +420,42 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "-r",
+        "--range",
+        default="",
+        help=textwrap.dedent(
+            """\
+                comma separated index of chapters to download;
+                using '[start]-[end]' to specify a range;
+                e.g. '1', '1,2', '1-10', '1,3-10' and '1-5,7-10';
+                using -c/--chapters option to see chapter index;
+                default is to download all chapters
+            """
+        ),
+    )
+    parser.add_argument(
+        "-l",
+        "--language",
+        metavar="LANG",
+        choices=["zh_sim", "zh_tra"],
+        default="zh_sim",
+        help=textwrap.dedent(
+            """\
+                website language
+                ('zh_sim' for Simplified Chinese, 'zh_tra' for Traditional Chinese),
+                default is 'zh_sim'
+            """
+        ),
+    )
+    parser.add_argument(
         "manga_or_chapter",
         help="manga (whose prefix is 'bz') or chapter (whose suffix is 'm') id",
     )
     args = parser.parse_args()
+    if args.threads <= 0:
+        raise ValueError("thread number must be greater than 0")
+    if not args.output_dir.exists() and not args.output_dir.is_dir():
+        raise FileNotFoundError(f"no such file or directory: {args.output_dir!r}")
 
     session = requests.Session()
     session.headers["User-Agent"] = choice(user_agents)
@@ -414,7 +485,14 @@ def main() -> int:
     else:
         chap_range = parse_range(args.range, manga_info)
     for n in chap_range:
-        download_manga(session, manga_info, n, is_chapter=is_chapter)
+        download_manga(
+            session,
+            manga_info,
+            n,
+            output_dir=args.output_dir,
+            max_workers=args.threads,
+            is_chapter=is_chapter,
+        )
     return 0
 
 
