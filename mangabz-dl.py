@@ -28,13 +28,13 @@ import shutil
 import sys
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html.parser import HTMLParser
 from pathlib import Path
 from random import choice
 from subprocess import PIPE, Popen
 from typing import NamedTuple
 
 import requests
-from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 # Unpacker for Dean Edward's p.a.c.k.e.r, a part of javascript beautifier
@@ -55,7 +55,7 @@ def unpack(source: str) -> str:
         " ]*,[ ]*k[ ]*,[ ]*e[ ]*,[ ]*",
         source,
     )
-    if mystr is None:
+    if not mystr:
         raise UnpackingError("not a P.A.C.K.E.R code")
 
     begin_offset = mystr.start()
@@ -204,6 +204,42 @@ class FileInfo(NamedTuple):
     file: Path
 
 
+class MetadataParser(HTMLParser):
+    """Parse HTML to fetch metadata."""
+
+    _is_title = False
+    _is_chap_name = False
+    _title = ""
+    _chap_href = ""
+    _chap_list: list[ChapterInfo] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = {t[0]: t[1] for t in attrs}
+        if tag == "p" and "class" in attrs_dict:
+            if "detail-info-title" in attrs_dict["class"].split(" "):
+                self._is_title = True
+        elif tag == "a" and "class" in attrs_dict and "herf" in attrs_dict:
+            if "detail-list-form-item" in attrs_dict["class"].split(" "):
+                self._is_chap_name = True
+                self._chap_href = attrs_dict["href"].strip("/")
+
+    def handle_data(self, data: str) -> None:
+        if self._is_title:
+            self._title = data.strip()
+            self._is_title = False
+        elif self._is_chap_name:
+            self._chap_list.insert(0, ChapterInfo(self._chap_href, data.strip()))
+            self._is_chap_name = False
+
+    @property
+    def title(self) -> str:
+        return self._title
+
+    @property
+    def chap_list(self) -> list[ChapterInfo]:
+        return self._chap_list
+
+
 def parse_range(string: str, info: MangaInfo) -> list[int]:
     """Parse comma separated string to a list.
 
@@ -248,20 +284,18 @@ def get_manga_info(
     """Get manga metadata."""
     response = session.get(f"https://mangabz.com/{manga}/")
     response.raise_for_status()
-    dom = BeautifulSoup(response.text, features="html.parser")
+    parser = MetadataParser()
+    parser.feed(response.text)
     if is_chapter:
         manga_title = find_mangabz_var("MANGABZ_CTITLE", response.text)
     else:
-        manga_title = dom.select("p.detail-info-title")[0].text.strip()
+        manga_title = parser.title
     chap_list: list[ChapterInfo] = []
     if is_chapter:
         chap_list.append(ChapterInfo(manga, manga_title))
     else:
-        for node in dom.select("a.detail-list-form-item"):
-            title, _ = [s for s in node.stripped_strings]
-            info = ChapterInfo(node.attrs["href"][1:-1], title)  # type: ignore
-            chap_list.append(info)
-    return MangaInfo(manga_title, chap_list[::-1])
+        chap_list.extend(parser.chap_list)
+    return MangaInfo(manga_title, chap_list)
 
 
 def list_chapters(info: MangaInfo) -> None:
@@ -296,16 +330,11 @@ def list_chapters(info: MangaInfo) -> None:
 
 
 def _download_file(session: requests.Session, info: FileInfo) -> bool:
-    """The function to parallel download data and save file."""
+    """The function to download data and save file, used in `download_manga`."""
     try:
-        response = requests.get(
-            info.url,
-            cookies=session.cookies,
-            headers={
-                "User-Agent": session.headers["User-Agent"],
-                "Referer": "https://mangabz.com/",
-            },
-        )
+        headers = session.headers
+        headers["Referer"] = "https://mangabz.com/"
+        response = requests.get(info.url, cookies=session.cookies, headers=headers)
         response.raise_for_status()
         info.file.write_bytes(response.content)
         return True
@@ -369,7 +398,7 @@ def download_manga(
     bar.close()
 
     print(f"downloading chapter {info.chapters[index].title!r}...")
-    success, failed = 0, 0
+    success, failure = 0, 0
     with (
         ThreadPoolExecutor(max_workers=max_workers) as executor,
         tqdm(total=len(file_lists), unit="file") as pbar,
@@ -381,16 +410,25 @@ def download_manga(
             if f.result:
                 success += 1
             else:
-                failed += 1
+                failure += 1
             pbar.update(1)
     print(
-        f"chapter {info.chapters[index].title!r} downloaded, {success} success and {failed} failed"
+        f"chapter {info.chapters[index].title!r} downloaded, "
+        + f"{success} success and {failure} {'failure' if failure <= 1 else 'failures'}"
     )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="A Python tool for downloading manga from Mangabz."
+        description="A Python tool for downloading manga from Mangabz.",
+        epilog=textwrap.dedent(
+            """\
+            After images have been downloaded, you can use ImageMagick to package images
+            as a pdf file by using 'magick *.jpg output.pdf'. Some options like
+            '-contrast-stretch' and '-lat' may be helpful to you. Visit
+            https://usage.imagemagick.org/ for detailed usage.
+            """
+        ),
     )
     parser.add_argument(
         "-d",
@@ -398,7 +436,7 @@ def main() -> int:
         metavar="DIR",
         type=Path,
         default=Path.cwd(),
-        help="output directory, default is current directory",
+        help="output directory, default is current working directory",
     )
     parser.add_argument(
         "-t",
@@ -414,8 +452,8 @@ def main() -> int:
         action="store_true",
         help=textwrap.dedent(
             """\
-                list chapters and exit,
-                output format is 'index: chapter name (chapter id)'
+                list chapters and exit, output format is
+                'index: chapter name (chapter id)'
             """
         ),
     )
@@ -425,11 +463,10 @@ def main() -> int:
         default="",
         help=textwrap.dedent(
             """\
-                comma separated index of chapters to download;
-                using '[start]-[end]' to specify a range;
-                e.g. '1', '1,2', '1-10', '1,3-10' and '1-5,7-10';
-                using -c/--chapters option to see chapter index;
-                default is to download all chapters
+                comma separated index of chapters to download; using '[start]-[end]' to
+                specify a range; e.g. '1', '1,2', '1-10', '1,3-10' and '1-5,7-10'; using
+                -c/--chapters option to see chapter index; default is to download
+                all chapters
             """
         ),
     )
@@ -441,15 +478,15 @@ def main() -> int:
         default="zh_sim",
         help=textwrap.dedent(
             """\
-                website language
-                ('zh_sim' for Simplified Chinese, 'zh_tra' for Traditional Chinese),
-                default is 'zh_sim'
+                website language ('zh_sim' for Simplified Chinese, 'zh_tra' for
+                Traditional Chinese), default is 'zh_sim'
             """
         ),
     )
     parser.add_argument(
-        "manga_or_chapter",
-        help="manga (whose prefix is 'bz') or chapter (whose suffix is 'm') id",
+        "url",
+        metavar="URL",
+        help="manga or chapter url",
     )
     args = parser.parse_args()
     if args.threads <= 0:
@@ -464,16 +501,24 @@ def main() -> int:
     else:
         session.cookies["mangabz_lang"] = "2"
 
-    if args.manga_or_chapter.endswith("bz"):
+    match = re.match(
+        r"^https?://(?:www\.)?mangabz\.com/(?P<id>m\d+(?:\-p\d+)?|\d+bz)(?:/.*?)?$",
+        args.url,
+    )
+    if not match:
+        print(f"cannot parse info from url: {args.url!r}")
+        return 1
+    manga_id = match["id"]
+    if manga_id.endswith("bz"):
         is_chapter = False
-        manga_info = get_manga_info(session, args.manga_or_chapter)
-    elif args.manga_or_chapter.startswith("m"):
+        manga_info = get_manga_info(session, manga_id, False)
+    elif manga_id.startswith("m"):
+        if "-" in manga_id:
+            manga_id = manga_id[: manga_id.find("-")]
         is_chapter = True
-        manga_info = get_manga_info(
-            session, args.manga_or_chapter, is_chapter=is_chapter
-        )
+        manga_info = get_manga_info(session, manga_id, True)
     else:
-        print(f"invalid manga or chapter id: {args.manga_or_chapter!r}")
+        print(f"invalid manga or chapter id: {manga_id!r}")
         return 1
 
     if args.chapters:
