@@ -218,7 +218,7 @@ class MetadataParser(HTMLParser):
         if tag == "p" and "class" in attrs_dict:
             if "detail-info-title" in attrs_dict["class"].split(" "):
                 self._is_title = True
-        elif tag == "a" and "class" in attrs_dict and "herf" in attrs_dict:
+        elif tag == "a" and "class" in attrs_dict and "href" in attrs_dict:
             if "detail-list-form-item" in attrs_dict["class"].split(" "):
                 self._is_chap_name = True
                 self._chap_href = attrs_dict["href"].strip("/")
@@ -490,9 +490,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     if args.threads <= 0:
-        raise ValueError("thread number must be greater than 0")
+        raise RuntimeError("thread number must be greater than 0")
     if not args.output_dir.exists() and not args.output_dir.is_dir():
-        raise FileNotFoundError(f"no such file or directory: {args.output_dir!r}")
+        raise RuntimeError(f"no such file or directory: {args.output_dir!r}")
 
     session = requests.Session()
     session.headers["User-Agent"] = choice(user_agents)
@@ -506,8 +506,7 @@ def main() -> int:
         args.url,
     )
     if not match:
-        print(f"cannot parse info from url: {args.url!r}")
-        return 1
+        raise RuntimeError(f"cannot parse info from url: {args.url!r}")
     manga_id = match["id"]
     if manga_id.endswith("bz"):
         is_chapter = False
@@ -518,8 +517,7 @@ def main() -> int:
         is_chapter = True
         manga_info = get_manga_info(session, manga_id, True)
     else:
-        print(f"invalid manga or chapter id: {manga_id!r}")
-        return 1
+        raise RuntimeError(f"invalid manga or chapter id: {manga_id!r}")
 
     if args.chapters:
         list_chapters(manga_info)
